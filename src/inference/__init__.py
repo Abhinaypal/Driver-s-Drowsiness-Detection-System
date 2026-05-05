@@ -3,6 +3,7 @@
 from .classifier import DrowsinessClassifier, RuleBasedClassifier, RealtimeInference
 from .image_classifier import CNNImageClassifier
 from .alert_system import AlertSystem
+from .ensemble import EnsembleDrowsinessDetector
 
 __all__ = [
     'DrowsinessClassifier',
@@ -10,4 +11,5 @@ __all__ = [
     'CNNImageClassifier',
     'RealtimeInference',
     'AlertSystem',
+    'EnsembleDrowsinessDetector',
 ]
