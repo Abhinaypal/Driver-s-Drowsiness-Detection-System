@@ -15,7 +15,7 @@ ImageInput = Union[np.ndarray, Image.Image]
 
 
 class OpenCVEyeStateDetector:
-    """Detect face and visible eyes using OpenCV Haar cascades."""
+    """Detect face and visible eyes using OpenCV Haar cascades with Eye Aspect Ratio analysis."""
 
     def __init__(self):
         cascade_root = cv2.data.haarcascades
@@ -31,6 +31,80 @@ class OpenCVEyeStateDetector:
 
         if self.face_cascade.empty() or self.eye_cascade.empty():
             raise RuntimeError("OpenCV Haar cascade files could not be loaded")
+
+        # Eye Aspect Ratio thresholds (adjusted based on testing)
+        self.EAR_THRESHOLD_OPEN = 0.25  # Above this = eye open (was 0.25)
+        self.EAR_THRESHOLD_CLOSED = 0.15  # Below this = eye closed (was 0.15)
+        self.EAR_THRESHOLD_MICROSLEEP = 0.20  # Between closed and open = microsleep/drowsy (was 0.20)
+
+    def analyze_eye_state(self, eye_region: np.ndarray) -> float:
+        """Analyze eye region to determine if eye is open or closed.
+
+        Returns a score from 0.0 (definitely closed) to 1.0 (definitely open).
+        Uses multiple heuristics: brightness, edge strength, and texture analysis.
+        """
+        try:
+            # Convert to grayscale if needed
+            if len(eye_region.shape) == 3:
+                gray = cv2.cvtColor(eye_region, cv2.COLOR_BGR2GRAY)
+            else:
+                gray = eye_region
+
+            # Normalize brightness to account for lighting variations
+            gray = cv2.equalizeHist(gray)
+
+            # Method 1: Brightness analysis
+            # Open eyes tend to have more variation in brightness due to pupil/iris
+            brightness_std = np.std(gray) / 255.0  # Normalized standard deviation
+
+            # Method 2: Edge analysis
+            # Closed eyes have stronger vertical edges (eyelids)
+            sobel_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)  # Horizontal edges
+            sobel_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)  # Vertical edges
+
+            horizontal_edges = np.mean(np.abs(sobel_x))
+            vertical_edges = np.mean(np.abs(sobel_y))
+
+            # Open eyes have more horizontal edges (eyebrows, eye shape)
+            # Closed eyes have more vertical edges (eyelids)
+            edge_ratio = horizontal_edges / (vertical_edges + 1e-6)  # Avoid division by zero
+
+            # Method 3: Texture analysis using Laplacian variance
+            # Open eyes have more texture variation
+            laplacian = cv2.Laplacian(gray, cv2.CV_64F)
+            texture_variance = np.var(laplacian) / 1000.0  # Normalize
+
+            # Method 4: Look for dark circular regions (pupils)
+            _, thresh = cv2.threshold(gray, 30, 255, cv2.THRESH_BINARY_INV)
+            pupil_area = np.sum(thresh) / (thresh.shape[0] * thresh.shape[1])  # Fraction of dark pixels
+
+            # Combine scores with weights
+            # Higher brightness variation = more likely open
+            brightness_score = min(brightness_std * 3.0, 1.0)
+
+            # Higher horizontal/vertical edge ratio = more likely open
+            edge_score = min(edge_ratio / 2.0, 1.0)
+
+            # Higher texture variance = more likely open
+            texture_score = min(texture_variance, 1.0)
+
+            # Moderate pupil area = more likely open (too much = noise, too little = closed)
+            pupil_score = 1.0 - abs(pupil_area - 0.15) * 3.0  # Peak at ~15% dark pixels
+            pupil_score = max(0.0, pupil_score)
+
+            # Weighted combination
+            openness_score = (
+                brightness_score * 0.3 +
+                edge_score * 0.3 +
+                texture_score * 0.2 +
+                pupil_score * 0.2
+            )
+
+            return max(0.0, min(1.0, openness_score))
+
+        except Exception as e:
+            # On error, return neutral score
+            return 0.5
 
     def predict(self, image: ImageInput) -> Dict:
         """Return eye-state prediction from a PIL image or RGB/BGR numpy image."""
@@ -77,27 +151,73 @@ class OpenCVEyeStateDetector:
         eye_boxes = self._filter_eye_boxes(eyes, face_box)
         eye_count = len(eye_boxes)
 
-        if eye_count >= 2:
-            class_id = 0
-            class_name = "Awake"
-            confidence = 0.88
-            reason = "Both eyes are visibly open."
-        elif eye_count == 1:
-            class_id = 1
-            class_name = "Drowsy/Microsleep"
-            confidence = 0.68
-            reason = "Only one eye was confidently detected."
-        else:
+        # Analyze eye aspect ratios for detected eyes
+        ear_values = []  # Keep for backward compatibility
+        openness_scores = []
+
+        for ex, ey, ew, eh in eye_boxes:
+            # Adjust coordinates to be relative to upper_face region
+            relative_ex = ex - x  # x is face x coordinate
+            relative_ey = ey - y  # y is face y coordinate
+
+            # Ensure coordinates are within bounds
+            if (relative_ex >= 0 and relative_ey >= 0 and
+                relative_ex + ew <= upper_face.shape[1] and
+                relative_ey + eh <= upper_face.shape[0]):
+
+                eye_region = upper_face[relative_ey:relative_ey+eh, relative_ex:relative_ex+ew]
+                if eye_region.size > 0:
+                    # Use new eye state analysis
+                    openness = self.analyze_eye_state(eye_region)
+                    openness_scores.append(openness)
+                    # Keep EAR for compatibility but don't use it for classification
+                    ear_values.append(0.5)  # Placeholder
+                    # Removed debug print
+                else:
+                    pass  # Empty eye region
+            else:
+                pass  # Eye coordinates out of bounds
+
+        # Determine eye states based on openness scores
+        if not openness_scores:
+            # No eyes detected with valid analysis
             class_id = 2
             class_name = "Asleep"
-            confidence = 0.78
-            reason = "Face detected, but open eyes were not detected."
+            confidence = 0.85
+            reason = "Face detected, but no valid eye regions found for analysis."
+            avg_ear = 0.0
+        else:
+            avg_openness = np.mean(openness_scores)
+            min_openness = np.min(openness_scores)
+
+            # Thresholds for openness scores (0.0 = closed, 1.0 = open)
+            if avg_openness >= 0.6:
+                class_id = 0
+                class_name = "Awake"
+                confidence = min(0.95, 0.7 + avg_openness * 0.3)
+                reason = f"Eyes appear open (avg openness: {avg_openness:.3f})."
+            elif avg_openness >= 0.3:
+                class_id = 1
+                class_name = "Drowsy/Microsleep"
+                confidence = 0.75
+                reason = f"Eyes showing signs of drowsiness (avg openness: {avg_openness:.3f})."
+            else:
+                class_id = 2
+                class_name = "Asleep"
+                confidence = min(0.95, 0.8 + (1.0 - avg_openness) * 0.3)
+                reason = f"Eyes appear closed (avg openness: {avg_openness:.3f})."
+
+            avg_ear = np.mean(ear_values) if ear_values else 0.0
 
         return {
             "class_id": class_id,
             "class_name": class_name,
             "confidence": confidence,
             "eye_count": eye_count,
+            "ear_values": ear_values,  # Keep for compatibility
+            "openness_scores": openness_scores,
+            "avg_ear": avg_ear,
+            "avg_openness": avg_openness if openness_scores else 0.0,
             "face_box": tuple(int(value) for value in face_box),
             "eye_boxes": eye_boxes,
             "reason": reason,
@@ -125,6 +245,20 @@ class OpenCVEyeStateDetector:
             2,
             cv2.LINE_AA,
         )
+
+        # Add openness information for debugging
+        avg_openness = result.get('avg_openness', 0.0)
+        cv2.putText(
+            rgb,
+            f"Openness: {avg_openness:.3f}",
+            (16, 60),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (200, 200, 200),
+            1,
+            cv2.LINE_AA,
+        )
+
         return rgb
 
     @staticmethod

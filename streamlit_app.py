@@ -101,9 +101,41 @@ def preprocess_pil_image(image: Image.Image) -> np.ndarray:
     return np.transpose(normalized, (2, 0, 1))
 
 
-def predict_pil_image(image: Image.Image, classifier: CNNImageClassifier) -> Dict:
-    image_tensor = preprocess_pil_image(image)
-    return classifier.predict_details({"image_tensor": image_tensor})
+def extract_webcam_features(eye_result: Dict) -> Dict:
+    """Extract drowsiness features from OpenCV eye detection results for webcam images."""
+    eye_count = eye_result["eye_count"]
+    avg_openness = eye_result.get("avg_openness", 0.5)
+
+    # Estimate PERCLOS based on eye detection and openness
+    # PERCLOS = percentage of time eyes are closed
+    # For single frame: if eyes detected and open = low PERCLOS, if no eyes or closed = high PERCLOS
+    if eye_count >= 2:
+        # Both eyes detected
+        if avg_openness > 0.6:
+            perclos = 0.1  # Eyes open
+            eye_state = "Open"
+        elif avg_openness > 0.3:
+            perclos = 0.4  # Eyes drowsy
+            eye_state = "Drowsy/Microsleep"
+        else:
+            perclos = 0.8  # Eyes closed
+            eye_state = "Closed"
+    elif eye_count == 1:
+        # One eye detected - likely drowsy
+        perclos = 0.6
+        eye_state = "Drowsy/Microsleep"
+    else:
+        # No eyes detected - likely asleep
+        perclos = 0.9
+        eye_state = "Closed"
+
+    return {
+        "perclos": perclos,
+        "eye_state": eye_state,
+        "eye_state_label": eye_state,
+        "zone": "Webcam",
+        "head_pose": {"pitch": 0.0, "yaw": 0.0, "roll": 0.0}  # Default neutral pose
+    }
 
 
 def render_prediction(details: Dict, title: str = "CNN Prediction") -> None:
@@ -133,11 +165,20 @@ def render_eye_detection(result: Dict, title: str = "OpenCV Eye-State Detection"
         f"<span class='status-pill' style='background:{color}'>{class_name}</span>",
         unsafe_allow_html=True,
     )
-    cols = st.columns(3)
+    cols = st.columns(4)
     cols[0].metric("Confidence", f"{result['confidence']:.2%}")
     cols[1].metric("Detected Eyes", result["eye_count"])
-    cols[2].metric("Face", "Found" if result.get("face_box") else "Not found")
+    cols[2].metric("Avg Openness", f"{result.get('avg_openness', 0.0):.3f}")
+    cols[3].metric("Face", "Found" if result.get("face_box") else "Not found")
     st.caption(result["reason"])
+
+    # Show openness scores for each eye if available
+    openness_scores = result.get("openness_scores", [])
+    if openness_scores:
+        st.write("Individual eye openness scores:")
+        eye_cols = st.columns(len(openness_scores))
+        for i, openness in enumerate(openness_scores):
+            eye_cols[i].metric(f"Eye {i+1}", f"{openness:.3f}")
 
 
 def render_features(features: Dict) -> None:
@@ -217,9 +258,26 @@ def render_upload_page(
     with left:
         st.image(annotated, caption=uploaded_file.name, use_container_width=True)
     with right:
-        render_eye_detection(eye_result)
+        render_eye_detection(eye_result, "Webcam Eye-State Detection")
+
+        # Extract features and use rule-based classifier
+        webcam_features = extract_webcam_features(eye_result)
+        rule_classifier = load_rule_inference().classifier
+        rule_result = rule_classifier.predict(webcam_features)
+
+        st.subheader("Rule-Based Classification")
+        rule_class_name = {0: "Awake", 1: "Drowsy/Microsleep", 2: "Asleep"}.get(rule_result[0], "Unknown")
+        st.write(f"Prediction: **{rule_class_name}**")
+        st.write(f"Confidence: **{rule_result[1]:.2%}**")
+
+        # Show extracted features
+        st.subheader("Extracted Features")
+        cols = st.columns(2)
+        cols[0].metric("Estimated PERCLOS", f"{webcam_features['perclos']:.2f}")
+        cols[1].metric("Eye State", webcam_features['eye_state'])
+
         if cnn is None:
-            st.warning("CNN checkpoint is not available, so only OpenCV eye detection is shown.")
+            st.warning("CNN checkpoint is not available.")
         else:
             render_prediction(predict_pil_image(image, cnn), "Saved CNN Prediction")
 
@@ -295,17 +353,21 @@ def render_live_webcam_page(
 
             if latest_eye_result:
                 rgb = eye_detector.draw_detections(rgb, latest_eye_result)
+
+                # Get rule-based classification
+                webcam_features = extract_webcam_features(latest_eye_result)
+                rule_classifier = load_rule_inference().classifier
+                rule_result = rule_classifier.predict(webcam_features)
+                rule_class_name = {0: "Awake", 1: "Drowsy", 2: "Asleep"}.get(rule_result[0], "Unknown")
+
                 message = (
-                    "Eye detector: "
-                    f"{latest_eye_result['class_name']} "
-                    f"({latest_eye_result['confidence']:.2%}), "
-                    f"eyes={latest_eye_result['eye_count']}"
+                    f"OpenCV: {latest_eye_result['class_name']} ({latest_eye_result['confidence']:.0%}), "
+                    f"eyes={latest_eye_result['eye_count']} | "
+                    f"Rule-Based: {rule_class_name} ({rule_result[1]:.0%})"
                 )
                 if latest_cnn_details:
                     message += (
-                        " | CNN: "
-                        f"{latest_cnn_details['class_name']} "
-                        f"({latest_cnn_details['confidence']:.2%})"
+                        f" | CNN: {latest_cnn_details['class_name']} ({latest_cnn_details['confidence']:.0%})"
                     )
                 result_slot.info(message)
 

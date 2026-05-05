@@ -77,12 +77,31 @@ FEATURE_CONFIG = {
 
 # Alert configuration
 ALERT_CONFIG = {
+    # General settings
     "enable_audio": True,
     "enable_visual": True,
     "enable_sms": False,
-    "sms_phone": None,
     "log_to_file": True,
+    "sms_phone": None,
+    
+    # Audio alert settings
+    "audio_directory": str(PROJECT_ROOT / "audio_files"),
+    "audio_enabled": True,
+    "alert_type": "multi",  # 'beep', 'voice', 'alarm', 'music', 'multi'
+    "alert_volume": 0.8,    # 0.0 (silent) to 1.0 (max)
+    
+    # Alert message
     "alert_message": "Driver Drowsiness Alert!",
+    
+    # Alert sounds by intensity level
+    "drowsy_sounds": {
+        1: "beeps/beep_soft_drowsy.wav",      # Soft beep (first detection)
+        2: "alarms/alarm_drowsy_level2.wav",  # Medium alarm (repeated)
+        3: "voice/voice_drowsy_strong.wav",   # Loud voice alert (sustained)
+    },
+    "asleep_sounds": {
+        3: "alarms/alarm_asleep_emergency.wav",  # Emergency alarm (critical)
+    },
 }
 
 # Logging configuration
