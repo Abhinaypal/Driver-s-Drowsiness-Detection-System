@@ -52,6 +52,7 @@ logs/
 # Dataset (optional - uncomment if repo has space limit)
 # Simuletic_DMS_Dataset/images/
 # checkpoints/
+video dataset/
 
 # Other
 .env

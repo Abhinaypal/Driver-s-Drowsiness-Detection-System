@@ -11,7 +11,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from src.config import IMAGES_DIR, LABELS_DIR, MANIFESTS_DIR
+from src.config import VIDEOS_DIR, IMAGES_DIR, LABELS_DIRS, MANIFESTS_DIR
 from src.data import DatasetBuilder, DatasetManifestBuilder, summarize_manifest
 
 
@@ -30,7 +30,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
 
-    dataset_builder = DatasetBuilder(LABELS_DIR, IMAGES_DIR)
+    dataset_builder = DatasetBuilder(LABELS_DIRS, IMAGES_DIR, videos_dir=VIDEOS_DIR)
     manifest_builder = DatasetManifestBuilder(dataset_builder)
     rows = manifest_builder.build_rows()
 

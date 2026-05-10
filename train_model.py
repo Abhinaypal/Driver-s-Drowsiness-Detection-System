@@ -7,10 +7,11 @@ Example:
 import argparse
 import sys
 from pathlib import Path
+import random
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from src.config import CHECKPOINTS_DIR, DATA_SPLIT, IMAGES_DIR, LABELS_DIR, MODEL_CONFIG
+from src.config import CHECKPOINTS_DIR, DATA_SPLIT, IMAGES_DIR, LABELS_DIRS, VIDEOS_DIR, MODEL_CONFIG
 from src.data import DatasetBuilder, load_manifest
 from src.models import SimpleDrowsinessCNN, count_parameters
 from src.training import (
@@ -36,6 +37,12 @@ def parse_args() -> argparse.Namespace:
         help="Optional manifest path (.csv or .json). If set, training uses manifest rows instead of raw labels.",
     )
     parser.add_argument(
+        "--subsample",
+        type=float,
+        default=1.0,
+        help="Fraction of dataset to use (0.0 to 1.0). Recommended 0.05 for 8GB RAM testing.",
+    )
+    parser.add_argument(
         "--checkpoint",
         type=Path,
         default=CHECKPOINTS_DIR / "drowsiness_cnn.pt",
@@ -47,10 +54,17 @@ def main() -> int:
     args = parse_args()
 
     if args.manifest is not None:
-        dataset = load_manifest(args.manifest)
-        if not dataset:
+        full_dataset = load_manifest(args.manifest)
+        if not full_dataset:
             print(f"No samples found in manifest: {args.manifest}")
             return 1
+
+        dataset = full_dataset
+        if args.subsample < 1.0:
+            sample_size = int(len(full_dataset) * args.subsample)
+            print(f"Subsampling: Using {sample_size} samples ({args.subsample*100}%) from {len(full_dataset)}")
+            random.seed(42)
+            dataset = random.sample(full_dataset, sample_size)
 
         print(f"Training from manifest: {args.manifest}")
         train_loader, val_loader, test_loader = build_dataloaders_from_samples(
@@ -62,10 +76,10 @@ def main() -> int:
             num_workers=args.num_workers,
         )
     else:
-        dataset_builder = DatasetBuilder(LABELS_DIR, IMAGES_DIR)
+        dataset_builder = DatasetBuilder(LABELS_DIRS, IMAGES_DIR, videos_dir=VIDEOS_DIR)
         dataset = dataset_builder.get_dataset()
         if not dataset:
-            print("No dataset samples found. Check LABELS_DIR and IMAGES_DIR in src/config.py.")
+            print("No dataset samples found. Check VIDEOS_DIR and LABELS_DIR in src/config.py.")
             return 1
 
         print("Training from annotation dataset builder")

@@ -20,7 +20,7 @@ import argparse
 import sys
 import logging
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Union
 
 import numpy as np
 import torch
@@ -30,7 +30,7 @@ from torch.utils.data import DataLoader, TensorDataset
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from src.config import CHECKPOINTS_DIR, IMAGES_DIR, LABELS_DIR, MODEL_CONFIG
+from src.config import CHECKPOINTS_DIR, IMAGES_DIR, LABELS_DIRS, VIDEOS_DIR, MODEL_CONFIG
 from src.data import DatasetBuilder, AnnotationLoader
 from src.models import (
     SimpleDrowsinessCNN,
@@ -55,7 +55,7 @@ logger = logging.getLogger(__name__)
 class DatasetHelper:
     """Helper for loading and preparing datasets for both small and large scenarios."""
 
-    def __init__(self, images_dir: Path, labels_dir: Path, device: str = "cpu"):
+    def __init__(self, images_dir: Path, labels_dir: Union[Path, List[Path]], device: str = "cpu"):
         self.images_dir = images_dir
         self.labels_dir = labels_dir
         self.device = device
@@ -63,8 +63,13 @@ class DatasetHelper:
 
     def load_dataset(self) -> Tuple[List, List, List]:
         """Load dataset and return images, labels, and features."""
-        loader = AnnotationLoader(self.labels_dir)
-        builder = DatasetBuilder(self.labels_dir, self.images_dir, loader)
+        loader = AnnotationLoader(LABELS_DIRS, videos_dir=VIDEOS_DIR)
+        builder = DatasetBuilder(
+            LABELS_DIRS,
+            self.images_dir,
+            videos_dir=VIDEOS_DIR,
+            annotation_loader=loader,
+        )
         dataset = builder.get_dataset()
 
         images = []
@@ -429,7 +434,7 @@ def main() -> int:
     CHECKPOINTS_DIR.mkdir(parents=True, exist_ok=True)
 
     # Load dataset
-    helper = DatasetHelper(IMAGES_DIR, LABELS_DIR, args.device)
+    helper = DatasetHelper(IMAGES_DIR, LABELS_DIRS, args.device)
     images, labels, features = helper.load_dataset()
 
     if len(images) == 0:

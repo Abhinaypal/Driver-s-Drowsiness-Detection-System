@@ -19,6 +19,7 @@ from typing import Tuple, Dict, Optional
 import logging
 
 logger = logging.getLogger(__name__)
+VIDEO_EXTENSIONS = {'.avi', '.mp4', '.mov', '.mkv'}
 
 
 class ImageProcessor:
@@ -67,11 +68,23 @@ class ImageProcessor:
             np.ndarray: Image in RGB format, or None if loading fails
         """
         try:
-            # Load image (default is BGR)
-            image = cv2.imread(str(image_path))
-            if image is None:
-                logger.error(f"Failed to load image: {image_path}")
-                return None
+            # Load image from disk or extract the first frame from a video file.
+            if image_path.suffix.lower() in VIDEO_EXTENSIONS:
+                cap = cv2.VideoCapture(str(image_path))
+                if not cap.isOpened():
+                    logger.error(f"Failed to open video: {image_path}")
+                    return None
+                ret, frame = cap.read()
+                cap.release()
+                if not ret or frame is None:
+                    logger.error(f"Failed to read first frame from video: {image_path}")
+                    return None
+                image = frame
+            else:
+                image = cv2.imread(str(image_path))
+                if image is None:
+                    logger.error(f"Failed to load image: {image_path}")
+                    return None
             # Convert BGR to RGB for model input
             return cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         except Exception as e:

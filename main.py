@@ -9,7 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from src.config import (
-    DATASET_ROOT, IMAGES_DIR, LABELS_DIR, LOGS_DIR,
+    DATASET_ROOT, VIDEOS_DIR, IMAGES_DIR, LABELS_DIR, LABELS_DIRS, LOGS_DIR,
     MODEL_CONFIG, INFERENCE_CONFIG, LOGGING_CONFIG
 )
 from src.data import AnnotationLoader, DatasetBuilder
@@ -35,7 +35,7 @@ def demonstrate_data_loading():
     logger.info("=" * 60)
     
     # Load annotations
-    annotation_loader = AnnotationLoader(LABELS_DIR)
+    annotation_loader = AnnotationLoader(LABELS_DIRS, VIDEOS_DIR)
     logger.info(f"Available annotations: {annotation_loader.get_all_keys()}")
     
     # Get statistics
@@ -47,8 +47,8 @@ def demonstrate_data_loading():
     for cls, count in stats['classes'].items():
         logger.info(f"    {cls}: {count}")
     
-    # Build dataset
-    dataset_builder = DatasetBuilder(LABELS_DIR, IMAGES_DIR, annotation_loader)
+    # Build dataset from both image and video sources
+    dataset_builder = DatasetBuilder(LABELS_DIR, IMAGES_DIR, videos_dir=VIDEOS_DIR, annotation_loader=annotation_loader)
     dataset = dataset_builder.get_dataset()
     logger.info(f"\nBuilt dataset with {len(dataset)} samples")
     
@@ -126,7 +126,7 @@ def demonstrate_inference():
     )
     
     # Simulate inference on dataset
-    dataset_builder = DatasetBuilder(LABELS_DIR, IMAGES_DIR)
+    dataset_builder = DatasetBuilder(LABELS_DIRS, IMAGES_DIR, videos_dir=VIDEOS_DIR)
     dataset = dataset_builder.get_dataset()
     
     # Take first 15 samples for demo

@@ -1,8 +1,8 @@
 """
-Run image-based drowsiness inference with a trained CNN checkpoint.
+Run image or video-based drowsiness inference with a trained CNN checkpoint.
 
 Example:
-    python predict_image.py Simuletic_DMS_Dataset/images/driver_no_sleep_f5.jpg
+    python predict_image.py "video dataset/Dash/Dash/Female/1-FemaleNoGlasses.avi"
 """
 import argparse
 import sys

@@ -7,7 +7,7 @@ from pathlib import Path
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from src.config import LABELS_DIR, IMAGES_DIR, MANIFESTS_DIR, MODEL_CONFIG
+from src.config import VIDEOS_DIR, LABELS_DIRS, IMAGES_DIR, MANIFESTS_DIR, MODEL_CONFIG
 from src.data import AnnotationLoader, DatasetBuilder, DatasetManifestBuilder, load_manifest
 from src.preprocessing import ImageProcessor, FeatureExtractor, TemporalFeatureExtractor
 from src.inference import CNNImageClassifier, RuleBasedClassifier, RealtimeInference, AlertSystem
@@ -18,7 +18,7 @@ def test_manifest_generation():
     print("\nTesting Manifest Generation...")
 
     try:
-        builder = DatasetBuilder(LABELS_DIR, IMAGES_DIR)
+        builder = DatasetBuilder(LABELS_DIRS, IMAGES_DIR, videos_dir=VIDEOS_DIR)
         dataset = builder.get_dataset()
         manifest_builder = DatasetManifestBuilder(builder)
         rows = manifest_builder.build_rows()
@@ -52,7 +52,7 @@ def test_model_components():
         from src.models import SimpleDrowsinessCNN, count_parameters
         from src.training import DrowsinessImageDataset
 
-        builder = DatasetBuilder(LABELS_DIR, IMAGES_DIR)
+        builder = DatasetBuilder(LABELS_DIRS, IMAGES_DIR, videos_dir=VIDEOS_DIR)
         dataset = builder.get_dataset()
         torch_dataset = DrowsinessImageDataset(dataset[:2])
 
@@ -87,13 +87,13 @@ def test_data_loading():
     print("Testing Data Loading...")
     
     try:
-        loader = AnnotationLoader(LABELS_DIR)
+        loader = AnnotationLoader(LABELS_DIRS, VIDEOS_DIR)
         assert len(loader.get_all_keys()) > 0, "No annotations found"
         
         stats = loader.get_statistics()
         assert stats['total_samples'] > 0, "No samples found"
         
-        builder = DatasetBuilder(LABELS_DIR, IMAGES_DIR, loader)
+        builder = DatasetBuilder(LABELS_DIRS, IMAGES_DIR, videos_dir=VIDEOS_DIR, annotation_loader=loader)
         dataset = builder.get_dataset()
         assert len(dataset) > 0, "Dataset is empty"
         
@@ -111,8 +111,8 @@ def test_preprocessing():
     try:
         processor = ImageProcessor(target_size=(224, 224))
         
-        # Test with actual image
-        builder = DatasetBuilder(LABELS_DIR, IMAGES_DIR)
+        # Test with actual image or video frame
+        builder = DatasetBuilder(LABELS_DIRS, IMAGES_DIR, videos_dir=VIDEOS_DIR)
         dataset = builder.get_dataset()
         
         if dataset:
@@ -147,7 +147,7 @@ def test_feature_extraction():
     print("\nTesting Feature Extraction...")
     
     try:
-        builder = DatasetBuilder(LABELS_DIR, IMAGES_DIR)
+        builder = DatasetBuilder(LABELS_DIRS, IMAGES_DIR, videos_dir=VIDEOS_DIR)
         dataset = builder.get_dataset()
         
         if dataset:
@@ -258,7 +258,7 @@ def test_end_to_end():
     
     try:
         # Load data
-        builder = DatasetBuilder(LABELS_DIR, IMAGES_DIR)
+        builder = DatasetBuilder(LABELS_DIRS, IMAGES_DIR, videos_dir=VIDEOS_DIR)
         dataset = builder.get_dataset()
         
         # Initialize components
