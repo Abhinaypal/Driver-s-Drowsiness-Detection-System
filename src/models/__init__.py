@@ -1,8 +1,10 @@
 """Model definitions."""
 
-from .cnn import SimpleDrowsinessCNN, count_parameters
+from .cnn import ShallowDrowsinessCNN, SimpleDrowsinessCNN, TinyDrowsinessCNN, count_parameters
 
 __all__ = [
+    "ShallowDrowsinessCNN",
     "SimpleDrowsinessCNN",
+    "TinyDrowsinessCNN",
     "count_parameters",
 ]

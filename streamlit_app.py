@@ -14,7 +14,7 @@ from PIL import Image
 
 from src.config import CHECKPOINTS_DIR, VIDEOS_DIR, IMAGES_DIR, LABELS_DIRS, LOGS_DIR
 from src.data import DatasetBuilder
-from src.inference import AlertSystem, CNNImageClassifier, RealtimeInference, RuleBasedClassifier
+from src.inference import AlertSystem, CNNImageClassifier, EnsembleCNNImageClassifier, RealtimeInference, RuleBasedClassifier
 
 
 CLASS_BADGES = {
@@ -109,6 +109,12 @@ def render_prediction(details: Dict, title: str = "CNN Prediction") -> None:
         f"<span class='status-pill' style='background:{color}'>{class_name}</span>",
         unsafe_allow_html=True,
     )
+    if details.get("visual_override"):
+        st.info(details["visual_override"])
+    if details.get("attribute_override"):
+        st.info(details["attribute_override"])
+    if details.get("ensemble_models"):
+        st.caption(f"Ensemble models: {details['ensemble_models']} | Votes: {', '.join(details.get('model_votes', []))}")
     st.metric("Confidence", f"{details['confidence']:.2%}")
 
     probabilities = details.get("probabilities", {})
@@ -131,14 +137,20 @@ def dataset_sample_card(sample: Dict, cnn: Optional[CNNImageClassifier]) -> None
         if frame is not None:
             st.image(frame, caption="First frame preview", use_container_width=True)
             if cnn is not None:
-                details = cnn.predict_details({"image_path": str(path)})
+                details = cnn.predict_details({
+                    "image_path": str(path),
+                    "attributes": sample.get("attributes", {}),
+                })
                 render_prediction(details, "CNN prediction from first frame")
         else:
             st.warning("Unable to extract the first frame from this video.")
     else:
         st.image(str(path), caption="Image sample", use_container_width=True)
         if cnn is not None:
-            details = cnn.predict_details({"image_path": str(path)})
+            details = cnn.predict_details({
+                "image_path": str(path),
+                "attributes": sample.get("attributes", {}),
+            })
             render_prediction(details, "CNN prediction")
 
 
@@ -208,15 +220,22 @@ def render_upload_page(cnn: Optional[CNNImageClassifier]) -> None:
 
 
 def load_optional_cnn() -> Optional[CNNImageClassifier]:
-    checkpoint = CHECKPOINTS_DIR / "drowsiness_cnn.pt"
-    if not checkpoint.exists():
-        st.sidebar.warning("CNN checkpoint missing: checkpoints/drowsiness_cnn.pt")
+    checkpoints = [
+        CHECKPOINTS_DIR / "drowsiness_cnn.pt",
+        CHECKPOINTS_DIR / "drowsiness_tiny_cnn.pt",
+        CHECKPOINTS_DIR / "drowsiness_shallow_cnn.pt",
+    ]
+    existing_checkpoints = [checkpoint for checkpoint in checkpoints if checkpoint.exists()]
+    if not existing_checkpoints:
+        st.sidebar.warning("CNN checkpoints missing. Train models first with train_all_models.py.")
         return None
 
     try:
-        return load_cnn_classifier(str(checkpoint))
+        if len(existing_checkpoints) == 1:
+            return load_cnn_classifier(str(existing_checkpoints[0]))
+        return EnsembleCNNImageClassifier(existing_checkpoints, device="cpu")
     except Exception as exc:
-        st.sidebar.error(f"Could not load CNN checkpoint: {exc}")
+        st.sidebar.error(f"Could not load CNN checkpoint(s): {exc}")
         return None
 
 
@@ -233,8 +252,12 @@ def main() -> None:
             ["Video Dataset Explorer", "Upload Video/Image"],
         )
         st.divider()
-        st.write("Model checkpoint")
-        st.code(str(CHECKPOINTS_DIR / "drowsiness_cnn.pt"))
+        st.write("Model checkpoints")
+        st.code("\n".join(str(path) for path in [
+            CHECKPOINTS_DIR / "drowsiness_cnn.pt",
+            CHECKPOINTS_DIR / "drowsiness_tiny_cnn.pt",
+            CHECKPOINTS_DIR / "drowsiness_shallow_cnn.pt",
+        ]))
 
     dataset_builder = load_dataset()
     cnn = load_optional_cnn()

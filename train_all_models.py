@@ -22,6 +22,7 @@ import logging
 from pathlib import Path
 from typing import Dict, List, Tuple, Union
 
+import cv2
 import numpy as np
 import torch
 import torch.nn as nn
@@ -32,16 +33,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from src.config import CHECKPOINTS_DIR, IMAGES_DIR, LABELS_DIRS, VIDEOS_DIR, MODEL_CONFIG
 from src.data import DatasetBuilder, AnnotationLoader
-from src.models import (
-    SimpleDrowsinessCNN,
-    LSTMDrowsinessDetector,
-    GRUDrowsinessDetector,
-    CNNWithAttention,
-    ResNetWithAttention,
-    XGBoostDrowsinessClassifier,
-    LightGBMDrowsinessClassifier,
-    extract_feature_vector,
-)
+from src.models import ShallowDrowsinessCNN, SimpleDrowsinessCNN, TinyDrowsinessCNN
 from src.preprocessing import ImageProcessor, FeatureExtractor
 
 # Setup logging
@@ -50,6 +42,16 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+CLASS_NAMES = ("Awake", "Drowsy/Microsleep", "Asleep")
+TRAIN_IMAGE_SIZE = 96
+VIDEO_EXTENSIONS = {".avi", ".mp4", ".mov", ".mkv"}
+
+
+def set_seed(seed: int = 42) -> None:
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
 class DatasetHelper:
@@ -59,53 +61,99 @@ class DatasetHelper:
         self.images_dir = images_dir
         self.labels_dir = labels_dir
         self.device = device
-        self.image_processor = ImageProcessor()
+        self.image_processor = ImageProcessor(target_size=(TRAIN_IMAGE_SIZE, TRAIN_IMAGE_SIZE))
 
     def load_dataset(self) -> Tuple[List, List, List]:
         """Load dataset and return images, labels, and features."""
-        loader = AnnotationLoader(LABELS_DIRS, videos_dir=VIDEOS_DIR)
-        builder = DatasetBuilder(
-            LABELS_DIRS,
-            self.images_dir,
-            videos_dir=VIDEOS_DIR,
-            annotation_loader=loader,
-        )
-        dataset = builder.get_dataset()
-
         images = []
         labels = []
         features_list = []
 
-        logger.info(f"Loading {len(dataset)} samples...")
+        loader = AnnotationLoader(LABELS_DIRS, videos_dir=None)
+        builder = DatasetBuilder(LABELS_DIRS, self.images_dir, videos_dir=None, annotation_loader=loader)
+        annotation_samples = builder.get_dataset()
+        logger.info(f"Loading {len(annotation_samples)} annotated image samples...")
+        self._append_image_samples(annotation_samples, images, labels, features_list)
 
-        for idx, sample in enumerate(dataset):
-            if (idx + 1) % 20 == 0:
-                logger.info(f"  Processed {idx + 1}/{len(dataset)} samples")
-
-            # Load and preprocess image (returns CHW format)
-            try:
-                img = self.image_processor.preprocess(sample['image_path'])
-                if img is None:
-                    logger.warning(f"Failed to preprocess image {sample['image_path']}")
-                    continue
-                    
-                images.append(img)
-
-                # Get label
-                class_label = sample['class_label']
-                class_id = {'awake': 0, 'drowsy': 1, 'asleep': 2}.get(class_label, 0)
-                labels.append(class_id)
-
-                # Extract features for tree-based models
-                features = FeatureExtractor.extract_all_features(sample['attributes'])
-                features_list.append(features)
-
-            except Exception as e:
-                logger.warning(f"Failed to load sample {idx}: {e}")
-                continue
+        video_samples = self._load_video_frame_samples(frames_per_video=2)
+        logger.info(f"Loading {len(video_samples)} sampled video-frame samples...")
+        self._append_array_samples(video_samples, images, labels, features_list)
 
         logger.info(f"Successfully loaded {len(images)} samples")
         return images, labels, features_list
+
+    def _append_image_samples(self, samples: List[Dict], images: List, labels: List, features_list: List) -> None:
+        for idx, sample in enumerate(samples):
+            if (idx + 1) % 20 == 0:
+                logger.info(f"  Processed image sample {idx + 1}/{len(samples)}")
+            try:
+                img = self.image_processor.preprocess(sample["image_path"])
+                if img is None:
+                    continue
+                images.append(img)
+                labels.append(self._class_to_id(sample["class_label"]))
+                features_list.append(FeatureExtractor.extract_all_features(sample.get("attributes", {})))
+            except Exception as exc:
+                logger.warning(f"Failed to load image sample {idx}: {exc}")
+
+    def _append_array_samples(self, samples: List[Dict], images: List, labels: List, features_list: List) -> None:
+        for idx, sample in enumerate(samples):
+            if (idx + 1) % 100 == 0:
+                logger.info(f"  Processed video frame {idx + 1}/{len(samples)}")
+            img = self.image_processor.preprocess_array(sample["image"])
+            if img is None:
+                continue
+            images.append(img)
+            labels.append(self._class_to_id(sample["class_label"]))
+            features_list.append({})
+
+    def _load_video_frame_samples(self, frames_per_video: int = 2) -> List[Dict]:
+        samples = []
+        if not VIDEOS_DIR.exists():
+            return samples
+
+        video_paths = [path for path in VIDEOS_DIR.rglob("*") if path.suffix.lower() in VIDEO_EXTENSIONS]
+        for video_path in video_paths:
+            class_label = self._video_class_label(video_path)
+            if class_label == "unknown":
+                continue
+
+            cap = cv2.VideoCapture(str(video_path))
+            if not cap.isOpened():
+                continue
+
+            frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+            if frame_count <= 0:
+                positions = [0]
+            else:
+                positions = np.linspace(0.15, 0.75, frames_per_video)
+                positions = [min(frame_count - 1, max(0, int(frame_count * pos))) for pos in positions]
+
+            for position in positions:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, position)
+                ok, frame = cap.read()
+                if not ok or frame is None:
+                    continue
+                image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                samples.append({"image": image, "class_label": class_label})
+            cap.release()
+
+        return samples
+
+    @staticmethod
+    def _video_class_label(video_path: Path) -> str:
+        name = video_path.name.lower()
+        if "yawn" in name:
+            return "drowsy"
+        if "normal" in name or "talking" in name:
+            return "awake"
+        if "sleep" in name and "no_sleep" not in name:
+            return "asleep"
+        return "unknown"
+
+    @staticmethod
+    def _class_to_id(class_label: str) -> int:
+        return {"awake": 0, "drowsy": 1, "asleep": 2}.get(class_label, 0)
 
     def create_image_tensors(self, images: List, labels: List) -> Tuple[torch.Tensor, torch.Tensor]:
         """Convert images to PyTorch tensors."""
@@ -142,25 +190,34 @@ class DatasetHelper:
                 float(f.get('perclos', 0.0)),
                 float(eye_state_num),
                 float(zone_num),
-                float(f['head_pose'].get('pitch', 0.0)),
-                float(f['head_pose'].get('yaw', 0.0)),
-                float(f['head_pose'].get('roll', 0.0))
+                float(f.get('head_pose', {}).get('pitch', 0.0)),
+                float(f.get('head_pose', {}).get('yaw', 0.0)),
+                float(f.get('head_pose', {}).get('roll', 0.0))
             ]
 
         return torch.from_numpy(features_array).float().to(self.device)
 
-    def split_data(self, images: torch.Tensor, labels: torch.Tensor, 
+    def split_data(self, images: torch.Tensor, labels: torch.Tensor,
                    train_ratio: float = 0.7, val_ratio: float = 0.15) -> Dict:
-        """Split data into train/val/test sets."""
-        n = len(images)
-        indices = np.random.permutation(n)
+        """Split data into deterministic stratified train/val/test sets."""
+        labels_np = labels.detach().cpu().numpy()
+        train_indices = []
+        val_indices = []
+        test_indices = []
 
-        train_end = int(n * train_ratio)
-        val_end = train_end + int(n * val_ratio)
+        rng = np.random.default_rng(42)
+        for class_id in sorted(set(labels_np.tolist())):
+            class_indices = np.where(labels_np == class_id)[0]
+            rng.shuffle(class_indices)
+            train_end = int(len(class_indices) * train_ratio)
+            val_end = train_end + int(len(class_indices) * val_ratio)
+            train_indices.extend(class_indices[:train_end].tolist())
+            val_indices.extend(class_indices[train_end:val_end].tolist())
+            test_indices.extend(class_indices[val_end:].tolist())
 
-        train_idx = indices[:train_end]
-        val_idx = indices[train_end:val_end]
-        test_idx = indices[val_end:]
+        train_idx = torch.tensor(train_indices, dtype=torch.long, device=images.device)
+        val_idx = torch.tensor(val_indices, dtype=torch.long, device=images.device)
+        test_idx = torch.tensor(test_indices, dtype=torch.long, device=images.device)
 
         return {
             'train': (images[train_idx], labels[train_idx]),
@@ -175,21 +232,33 @@ class ModelTrainer:
     def __init__(self, device: str = "cpu"):
         self.device = device
 
-    def train_cnn(self, train_data: Tuple, val_data: Tuple, epochs: int = 20, 
-                  batch_size: int = 16, lr: float = 0.001) -> str:
-        """Train SimpleDrowsinessCNN."""
+    def train_cnn(
+        self,
+        train_data: Tuple,
+        val_data: Tuple,
+        epochs: int = 20,
+        batch_size: int = 16,
+        lr: float = 0.001,
+        model_class=SimpleDrowsinessCNN,
+        checkpoint_name: str = "drowsiness_cnn.pt",
+        model_name: str = "SimpleDrowsinessCNN",
+    ) -> str:
+        """Train an image CNN."""
         logger.info("=" * 60)
-        logger.info("Training SimpleDrowsinessCNN")
+        logger.info(f"Training {model_name}")
         logger.info("=" * 60)
 
         train_images, train_labels = train_data
         val_images, val_labels = val_data
 
-        model = SimpleDrowsinessCNN(num_classes=3).to(self.device)
+        model = model_class(num_classes=3).to(self.device)
         logger.info(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
 
         optimizer = optim.Adam(model.parameters(), lr=lr)
-        criterion = nn.CrossEntropyLoss()
+        class_counts = torch.bincount(train_labels.detach().cpu(), minlength=3).float()
+        class_weights = class_counts.sum() / (len(class_counts) * torch.clamp(class_counts, min=1.0))
+        criterion = nn.CrossEntropyLoss(weight=class_weights.to(self.device))
+        logger.info(f"Class weights: {[round(weight.item(), 3) for weight in class_weights]}")
         train_loader = DataLoader(
             TensorDataset(train_images, train_labels),
             batch_size=batch_size,
@@ -201,6 +270,8 @@ class ModelTrainer:
         )
 
         best_val_acc = 0.0
+        best_metrics = {}
+        history = []
         for epoch in range(epochs):
             # Train
             model.train()
@@ -239,14 +310,67 @@ class ModelTrainer:
                 f"Val Loss: {val_loss / len(val_loader):.4f}, "
                 f"Val Acc: {val_acc:.4f}"
             )
+            history.append({
+                "epoch": epoch + 1,
+                "train_loss": train_loss / len(train_loader),
+                "train_accuracy": train_acc,
+                "val_loss": val_loss / len(val_loader),
+                "val_accuracy": val_acc,
+            })
 
             if val_acc > best_val_acc:
                 best_val_acc = val_acc
-                checkpoint_path = CHECKPOINTS_DIR / "drowsiness_cnn.pt"
-                torch.save(model.state_dict(), checkpoint_path)
+                best_metrics = history[-1]
+                checkpoint_path = CHECKPOINTS_DIR / checkpoint_name
+                torch.save(
+                    {
+                        "epoch": epoch + 1,
+                        "architecture": model_class.__name__,
+                        "input_size": TRAIN_IMAGE_SIZE,
+                        "model_state_dict": model.state_dict(),
+                        "optimizer_state_dict": optimizer.state_dict(),
+                        "metrics": best_metrics,
+                        "history": history,
+                        "class_names": CLASS_NAMES,
+                    },
+                    checkpoint_path,
+                )
                 logger.info(f"✓ Saved checkpoint: {checkpoint_path}")
 
-        return str(CHECKPOINTS_DIR / "drowsiness_cnn.pt")
+        return str(CHECKPOINTS_DIR / checkpoint_name)
+
+    def evaluate_cnn(self, checkpoint_path: str, test_data: Tuple, batch_size: int = 16) -> Dict:
+        """Evaluate the trained CNN on the held-out test split."""
+        test_images, test_labels = test_data
+        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        architecture = checkpoint.get("architecture", "SimpleDrowsinessCNN") if isinstance(checkpoint, dict) else "SimpleDrowsinessCNN"
+        model_class = {
+            "SimpleDrowsinessCNN": SimpleDrowsinessCNN,
+            "TinyDrowsinessCNN": TinyDrowsinessCNN,
+            "ShallowDrowsinessCNN": ShallowDrowsinessCNN,
+        }.get(architecture, SimpleDrowsinessCNN)
+        model = model_class(num_classes=3).to(self.device)
+        state_dict = checkpoint.get("model_state_dict", checkpoint)
+        model.load_state_dict(state_dict)
+        model.eval()
+
+        loader = DataLoader(TensorDataset(test_images, test_labels), batch_size=batch_size)
+        confusion = torch.zeros((3, 3), dtype=torch.long)
+        correct = 0
+        total = 0
+        with torch.no_grad():
+            for images, labels in loader:
+                logits = model(images)
+                predictions = logits.argmax(1)
+                correct += (predictions == labels).sum().item()
+                total += labels.numel()
+                for target, prediction in zip(labels.detach().cpu(), predictions.detach().cpu()):
+                    confusion[int(target), int(prediction)] += 1
+
+        accuracy = correct / total if total else 0.0
+        logger.info(f"Test accuracy: {accuracy:.4f}")
+        logger.info(f"Confusion matrix rows=true cols=pred:\n{confusion.numpy()}")
+        return {"accuracy": accuracy, "confusion_matrix": confusion.tolist()}
 
     def train_lstm(self, train_data: Tuple, val_data: Tuple, epochs: int = 20,
                    batch_size: int = 16, lr: float = 0.001, seq_len: int = 5) -> str:
@@ -380,7 +504,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model",
         action="append",
-        choices=["cnn", "lstm", "gru", "attention", "resnet", "xgboost", "lightgbm"],
+        choices=["cnn", "tiny_cnn", "shallow_cnn"],
         help="Specific model to train (can be repeated)"
     )
     parser.add_argument("--epochs", type=int, default=20)
@@ -421,6 +545,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    set_seed(42)
 
     logger.info("=" * 60)
     logger.info("DROWSINESS DETECTION MODEL TRAINING")
@@ -461,7 +586,8 @@ def main() -> int:
     # Determine which models to train
     models_to_train = []
     if args.all:
-        models_to_train = ["cnn", "resnet"]  # Core models for images
+        models_to_train = ["cnn", "tiny_cnn", "shallow_cnn"]
+        logger.info("Training all implemented neural models: cnn, tiny_cnn, shallow_cnn")
     elif args.model:
         models_to_train = args.model
     else:
@@ -476,9 +602,39 @@ def main() -> int:
             splits['train'], splits['val'],
             epochs=args.epochs,
             batch_size=args.batch_size,
-            lr=args.learning_rate
+            lr=args.learning_rate,
+            model_class=SimpleDrowsinessCNN,
+            checkpoint_name="drowsiness_cnn.pt",
+            model_name="SimpleDrowsinessCNN",
         )
+        trainer.evaluate_cnn(path, splits['test'], batch_size=args.batch_size)
         trained_models.append(("CNN", path))
+
+    if "tiny_cnn" in models_to_train:
+        path = trainer.train_cnn(
+            splits['train'], splits['val'],
+            epochs=args.epochs,
+            batch_size=args.batch_size,
+            lr=args.learning_rate,
+            model_class=TinyDrowsinessCNN,
+            checkpoint_name="drowsiness_tiny_cnn.pt",
+            model_name="TinyDrowsinessCNN",
+        )
+        trainer.evaluate_cnn(path, splits['test'], batch_size=args.batch_size)
+        trained_models.append(("Tiny CNN", path))
+
+    if "shallow_cnn" in models_to_train:
+        path = trainer.train_cnn(
+            splits['train'], splits['val'],
+            epochs=args.epochs,
+            batch_size=args.batch_size,
+            lr=args.learning_rate,
+            model_class=ShallowDrowsinessCNN,
+            checkpoint_name="drowsiness_shallow_cnn.pt",
+            model_name="ShallowDrowsinessCNN",
+        )
+        trainer.evaluate_cnn(path, splits['test'], batch_size=args.batch_size)
+        trained_models.append(("Shallow CNN", path))
 
     if "resnet" in models_to_train:
         path = trainer.train_resnet_attention(

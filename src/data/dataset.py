@@ -9,13 +9,13 @@ import logging
 logger = logging.getLogger(__name__)
 VIDEO_EXTENSIONS = {'.avi', '.mp4', '.mov', '.mkv'}
 VIDEO_CLASS_KEYWORDS = {
+    'no_sleep': 'awake',
     'yawn': 'drowsy',
     'yawning': 'drowsy',
     'talking': 'awake',
     'normal': 'awake',
     'awake': 'awake',
     'sleep': 'asleep',
-    'no_sleep': 'awake',
 }
 
 
@@ -196,10 +196,14 @@ class DatasetBuilder:
     def _build_from_annotations(self, seen_paths: set):
         for annotation_key in self.annotation_loader.get_all_keys():
             samples = self.annotation_loader.get_samples(annotation_key)
-            class_label = self.annotation_loader.get_class_label(annotation_key)
-            class_id = self._class_to_id(class_label)
+            fallback_class_label = self.annotation_loader.get_class_label(annotation_key)
 
             for sample in samples:
+                class_label = self._class_from_attributes(
+                    sample.get('attributes', {}),
+                    fallback_class_label,
+                )
+                class_id = self._class_to_id(class_label)
                 image_path = None
                 if sample.get('image'):
                     image_path = Path(sample['image'])
@@ -319,6 +323,23 @@ class DatasetBuilder:
             2: 'asleep',
         }
         return mapping.get(class_id, 'unknown')
+
+    @staticmethod
+    def _class_from_attributes(attributes: Dict, fallback: str) -> str:
+        """Derive a per-frame class from annotation attributes when available."""
+        eye_state = str(attributes.get('eye_state', '')).lower()
+        perclos = float(attributes.get('perclos', 0.0) or 0.0)
+
+        if 'closed' in eye_state:
+            return 'asleep'
+        if 'drowsy' in eye_state or 'microsleep' in eye_state:
+            return 'asleep' if perclos >= 0.8 else 'drowsy'
+        if 'open' in eye_state:
+            if perclos >= 0.8:
+                return 'asleep'
+            return 'awake'
+
+        return fallback
 
     def get_dataset(self) -> List[Dict]:
         """Get the built dataset."""

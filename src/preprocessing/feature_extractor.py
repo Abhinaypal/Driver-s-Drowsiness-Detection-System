@@ -68,6 +68,7 @@ class ImageProcessor:
             np.ndarray: Image in RGB format, or None if loading fails
         """
         try:
+            image_path = Path(image_path)
             # Load image from disk or extract the first frame from a video file.
             if image_path.suffix.lower() in VIDEO_EXTENSIONS:
                 cap = cv2.VideoCapture(str(image_path))
@@ -138,6 +139,7 @@ class ImageProcessor:
         Returns:
             np.ndarray: Preprocessed image in shape (C, H, W), or None if failed
         """
+        image_path = Path(image_path)
         # Step 1: Load image
         image = self.load_image(image_path)
         if image is None:
@@ -153,6 +155,14 @@ class ImageProcessor:
         image = np.transpose(image, (2, 0, 1))
         
         return image
+
+    def preprocess_array(self, image: np.ndarray) -> Optional[np.ndarray]:
+        """Preprocess an already-loaded RGB image array."""
+        if image is None:
+            return None
+        image = self.resize(image)
+        image = self.normalize(image)
+        return np.transpose(image, (2, 0, 1))
 
 
 class FeatureExtractor:

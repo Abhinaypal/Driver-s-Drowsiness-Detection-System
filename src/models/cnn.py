@@ -60,6 +60,73 @@ class SimpleDrowsinessCNN(nn.Module):
             return torch.softmax(logits, dim=1)
 
 
+class TinyDrowsinessCNN(nn.Module):
+    """Smaller CNN used as a second neural model for ensemble inference."""
+
+    def __init__(self, num_classes: int = 3, dropout: float = 0.25):
+        super().__init__()
+        self.features = nn.Sequential(
+            self._conv_block(3, 24),
+            nn.MaxPool2d(2),
+            self._conv_block(24, 48),
+            nn.MaxPool2d(2),
+            self._conv_block(48, 96),
+            nn.AdaptiveAvgPool2d((1, 1)),
+        )
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Dropout(dropout),
+            nn.Linear(96, 64),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
+            nn.Linear(64, num_classes),
+        )
+
+    @staticmethod
+    def _conv_block(in_channels: int, out_channels: int) -> nn.Sequential:
+        return nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+        )
+
+    def forward(self, images: torch.Tensor) -> torch.Tensor:
+        features = self.features(images)
+        return self.classifier(features)
+
+
+class ShallowDrowsinessCNN(nn.Module):
+    """Fast shallow CNN with a different bias profile for ensemble diversity."""
+
+    def __init__(self, num_classes: int = 3, dropout: float = 0.2):
+        super().__init__()
+        self.features = nn.Sequential(
+            nn.Conv2d(3, 32, kernel_size=5, stride=2, padding=2, bias=False),
+            nn.BatchNorm2d(32),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2),
+            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True),
+            nn.AdaptiveAvgPool2d((1, 1)),
+        )
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Dropout(dropout),
+            nn.Linear(128, num_classes),
+        )
+
+    def forward(self, images: torch.Tensor) -> torch.Tensor:
+        features = self.features(images)
+        return self.classifier(features)
+
+
 def count_parameters(model: nn.Module) -> Dict[str, int]:
     """Return total and trainable parameter counts."""
     total = sum(param.numel() for param in model.parameters())
