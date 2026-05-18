@@ -80,7 +80,6 @@ class CNNImageClassifier(DrowsinessClassifier):
 
     def predict_details(self, features: Union[Dict, str, Path]) -> Dict:
         image_path = self._extract_image_path(features)
-        annotation_details = self._annotation_details(features)
         image_batch = self._prepare_input(features)
         self.model.eval()
 
@@ -98,44 +97,7 @@ class CNNImageClassifier(DrowsinessClassifier):
                 for index, value in enumerate(probabilities)
             },
         }
-        if annotation_details is not None:
-            details = annotation_details
         return self._apply_visual_sanity_check(details, image_path)
-
-    def _annotation_details(self, features: Union[Dict, str, Path]) -> Optional[Dict]:
-        if not isinstance(features, dict):
-            return None
-
-        attributes = features.get("attributes", features)
-        eye_state = str(attributes.get("eye_state", "")).lower()
-        perclos = float(attributes.get("perclos", 0.0) or 0.0)
-
-        if "closed" in eye_state or perclos >= 0.8:
-            class_id = 2
-            confidence = max(perclos, 0.85)
-        elif "open" in eye_state:
-            class_id = 0
-            confidence = max(1.0 - perclos, 0.80)
-        elif "drowsy" in eye_state or "microsleep" in eye_state or perclos >= 0.2:
-            class_id = 1
-            confidence = max(min(perclos + 0.45, 0.90), 0.65)
-        else:
-            return None
-
-        probabilities = {class_name: 0.05 for class_name in self.class_names}
-        probabilities[self.class_names[class_id]] = confidence
-        remaining = max(0.0, 1.0 - confidence)
-        other_classes = [name for index, name in enumerate(self.class_names) if index != class_id]
-        for class_name in other_classes:
-            probabilities[class_name] = remaining / len(other_classes)
-
-        return {
-            "class_id": class_id,
-            "class_name": self.class_names[class_id],
-            "confidence": confidence,
-            "probabilities": probabilities,
-            "attribute_override": "Prediction uses annotation eye_state/PERCLOS for this dataset sample.",
-        }
 
     def _extract_image_path(self, features: Union[Dict, str, Path]) -> Optional[Path]:
         if isinstance(features, (str, Path)):

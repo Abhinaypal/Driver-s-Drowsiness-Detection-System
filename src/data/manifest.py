@@ -43,11 +43,14 @@ class DatasetManifestBuilder:
 
         for sample in self.dataset_builder.get_dataset():
             annotation_key = sample["annotation_key"]
-            metadata = self.dataset_builder.annotation_loader.get_metadata(annotation_key)
-            source_video = metadata.get("source", "")
-            video_id = Path(source_video).stem if source_video else annotation_key
+            metadata = self._metadata_for_sample(annotation_key)
             attributes = sample.get("attributes", {})
+            source_video = metadata.get("source", "")
+            if not source_video and attributes.get("video"):
+                source_video = attributes.get("source_path", sample["image_path"])
+            video_id = Path(source_video).stem if source_video else annotation_key
             head_pose = FeatureExtractor.extract_head_pose(attributes)
+            label_file = f"{annotation_key}.json" if metadata else ""
 
             rows.append(
                 {
@@ -55,7 +58,7 @@ class DatasetManifestBuilder:
                     "image_rel_path": self._to_relative_path(sample["image_path"]),
                     "image_name": sample["image_name"],
                     "annotation_key": annotation_key,
-                    "label_file": f"{annotation_key}.json",
+                    "label_file": label_file,
                     "video_id": video_id,
                     "source_video": source_video,
                     "class_id": sample["class_id"],
@@ -74,6 +77,12 @@ class DatasetManifestBuilder:
             )
 
         return rows
+
+    def _metadata_for_sample(self, annotation_key: str) -> Dict[str, Any]:
+        try:
+            return self.dataset_builder.annotation_loader.get_metadata(annotation_key)
+        except ValueError:
+            return {}
 
     def save(self, output_path: Path, rows: Optional[Iterable[Dict[str, Any]]] = None) -> Path:
         manifest_rows = list(rows) if rows is not None else self.build_rows()

@@ -16,7 +16,7 @@ import logging
 from typing import Dict, List, Tuple, Optional
 import numpy as np
 from collections import deque
-from datetime import datetime, timedelta
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -101,26 +101,27 @@ class RuleBasedClassifier(DrowsinessClassifier):
             - confidence: float (0-1) indicating prediction confidence
         """
         # Extract features
-        perclos = features.get('perclos', 0.0)
-        eye_state = features.get('eye_state', 'Open')
+        perclos = float(features.get('perclos', 0.0) or 0.0)
+        eye_state = str(features.get('eye_state', 'Open')).lower()
         
-        # Rule 1: If eyes closed, classify as asleep
-        if 'Closed' in eye_state:
-            confidence = min(perclos + 0.3, 1.0)  # High confidence
+        # Rule 1: If eyes closed, classify as asleep (highest confidence)
+        if 'closed' in eye_state:
+            confidence = min(perclos + 0.4, 1.0)  # Very high confidence
             return 2, confidence
         
         # Rule 2: If eyes drowsy/microsleep
-        if 'Drowsy' in eye_state or 'Microsleep' in eye_state:
-            confidence = max(perclos, 0.5)  # At least 50% confidence
-            # Check if should be asleep instead
-            if perclos > self.perclos_asleep_threshold:
+        if 'drowsy' in eye_state or 'microsleep' in eye_state:
+            confidence = max(perclos, 0.55)  # At least 55% confidence
+            # Check if should be asleep instead (lower threshold for asleep)
+            if perclos > self.perclos_asleep_threshold * 0.8:  # More sensitive
                 return 2, confidence  # Asleep
             return 1, confidence  # Drowsy
         
-        # Rule 3: If eyes open but high PERCLOS
-        if perclos > self.perclos_asleep_threshold:
+        # Rule 3: If eyes open but high PERCLOS (eyes closing rapidly)
+        # Lower thresholds to be more sensitive to eye closure
+        if perclos > self.perclos_asleep_threshold * 0.9:  # More sensitive
             return 2, perclos  # Asleep
-        elif perclos > self.perclos_drowsy_threshold:
+        elif perclos > self.perclos_drowsy_threshold * 1.2:  # More sensitive
             return 1, perclos  # Drowsy
         
         # Rule 4: Default to awake
@@ -155,7 +156,8 @@ class RealtimeInference:
                  classifier: DrowsinessClassifier,
                  sequence_length: int = 10,
                  alert_threshold: float = 0.6,
-                 alert_cooldown_seconds: float = 5.0):
+                 alert_cooldown_seconds: float = 5.0,
+                 asleep_duration_threshold: float = 3.0):
         """
         Initialize the real-time inference engine.
         
@@ -164,11 +166,13 @@ class RealtimeInference:
             sequence_length: Number of frames to keep in history (default: 10)
             alert_threshold: Temporal score threshold for alerts (default: 0.6)
             alert_cooldown_seconds: Minimum seconds between alerts (default: 5)
+            asleep_duration_threshold: Required seconds of continuous Asleep detection before alert
         """
         self.classifier = classifier
         self.sequence_length = sequence_length
         self.alert_threshold = alert_threshold
         self.alert_cooldown_seconds = alert_cooldown_seconds
+        self.asleep_duration_threshold = asleep_duration_threshold
         
         # Buffers for temporal analysis
         self.predictions_buffer = deque(maxlen=sequence_length)  # Class IDs
@@ -179,6 +183,7 @@ class RealtimeInference:
         self.last_alert_time = None  # When was last alert triggered
         self.alert_count = 0         # Total alerts generated
         self.is_alerting = False     # Current alert state
+        self.asleep_start_time = None  # When continuous Asleep detection began
     
     def predict(self, features: Dict) -> Dict:
         """
@@ -213,12 +218,19 @@ class RealtimeInference:
         self.predictions_buffer.append(class_id)
         self.confidence_buffer.append(confidence)
         self.features_buffer.append(features)
+        self._update_asleep_timer(class_id)
         
         # Step 3: Calculate temporal metrics
         temporal_score = self._calculate_temporal_score()
         
         # Step 4: Determine if alert should be triggered
         should_alert = self._should_alert(class_id, confidence, temporal_score)
+        alert_count = self.alert_count
+        time_since_last_alert = self._get_alert_cooldown_status()
+        if should_alert:
+            self.update_alert_state(True)
+        else:
+            self.update_alert_state(False)
         
         # Step 5: Build comprehensive response
         result = {
@@ -233,8 +245,8 @@ class RealtimeInference:
         
         # Add alert info if triggered
         if should_alert:
-            result['alert_count'] = self.alert_count
-            result['time_since_last_alert'] = self._get_alert_cooldown_status()
+            result['alert_count'] = alert_count + 1
+            result['time_since_last_alert'] = time_since_last_alert
         
         return result
     
@@ -282,6 +294,20 @@ class RealtimeInference:
         # Clamp to 0-1 range
         return min(weighted_score, 1.0)
     
+    def _update_asleep_timer(self, class_id: int) -> None:
+        """Record when continuous Asleep frames begin."""
+        if class_id == 2:
+            if self.asleep_start_time is None:
+                self.asleep_start_time = datetime.now()
+        else:
+            self.asleep_start_time = None
+
+    def _asleep_duration(self) -> float:
+        """Return how many seconds Asleep has been continuous."""
+        if self.asleep_start_time is None:
+            return 0.0
+        return (datetime.now() - self.asleep_start_time).total_seconds()
+
     def _should_alert(self, class_id: int, confidence: float, temporal_score: float) -> bool:
         """Determine if alert should be triggered"""
         # Check cooldown
@@ -289,10 +315,10 @@ class RealtimeInference:
             return False
         
         # Alert conditions
-        # 1. High confidence of asleep state
-        if class_id == 2 and confidence > 0.7:
+        # 1. Continuous eyes-closed detection for the required duration
+        if class_id == 2 and self._asleep_duration() >= self.asleep_duration_threshold:
             return True
-        
+
         # 2. Persistent drowsy state (high temporal score)
         if class_id == 1 and temporal_score > self.alert_threshold:
             return True
@@ -347,6 +373,12 @@ class RealtimeInference:
     def update_alert_state(self, alert_triggered: bool):
         """Update alert state after processing"""
         if alert_triggered:
+            if (
+                self.is_alerting
+                and self.last_alert_time is not None
+                and (datetime.now() - self.last_alert_time).total_seconds() < 0.5
+            ):
+                return
             self.alert_count += 1
             self.last_alert_time = datetime.now()
             self.is_alerting = True
@@ -382,3 +414,4 @@ class RealtimeInference:
         self.last_alert_time = None
         self.alert_count = 0
         self.is_alerting = False
+        self.asleep_start_time = None

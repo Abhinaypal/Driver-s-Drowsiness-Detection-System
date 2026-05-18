@@ -8,7 +8,7 @@ Usage:
     python train_all_models.py --all
 
     # Train specific models
-    python train_all_models.py --model cnn --model lstm
+    python train_all_models.py --model cnn --model tiny_cnn
 
     # For large datasets (>1000 samples)
     python train_all_models.py --all --large-dataset --batch-size 32
@@ -372,132 +372,6 @@ class ModelTrainer:
         logger.info(f"Confusion matrix rows=true cols=pred:\n{confusion.numpy()}")
         return {"accuracy": accuracy, "confusion_matrix": confusion.tolist()}
 
-    def train_lstm(self, train_data: Tuple, val_data: Tuple, epochs: int = 20,
-                   batch_size: int = 16, lr: float = 0.001, seq_len: int = 5) -> str:
-        """Train LSTMDrowsinessDetector."""
-        logger.info("=" * 60)
-        logger.info("Training LSTMDrowsinessDetector")
-        logger.info("=" * 60)
-
-        train_images, train_labels = train_data
-        val_images, val_labels = val_data
-
-        # Create sequences from images (simulate temporal data)
-        # For real application, use actual video frames
-        train_sequences = self._create_sequences(train_images, seq_len)
-        val_sequences = self._create_sequences(val_images, seq_len)
-
-        if len(train_sequences) == 0:
-            logger.warning("Not enough samples for LSTM sequences. Skipping LSTM training.")
-            return ""
-
-        model = LSTMDrowsinessDetector(num_classes=3, hidden_size=128).to(self.device)
-        logger.info(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
-
-        optimizer = optim.Adam(model.parameters(), lr=lr)
-        criterion = nn.CrossEntropyLoss()
-
-        for epoch in range(epochs):
-            model.train()
-            train_loss = 0.0
-
-            for seq, label in zip(train_sequences, train_labels[:len(train_sequences)]):
-                optimizer.zero_grad()
-                seq_tensor = seq.unsqueeze(0)  # Add batch dimension
-                outputs = model(seq_tensor)
-                loss = criterion(outputs, torch.tensor([label], device=self.device))
-                loss.backward()
-                optimizer.step()
-                train_loss += loss.item()
-
-            logger.info(f"Epoch {epoch + 1}/{epochs} | Train Loss: {train_loss / len(train_sequences):.4f}")
-
-        checkpoint_path = CHECKPOINTS_DIR / "drowsiness_lstm.pt"
-        torch.save(model.state_dict(), checkpoint_path)
-        logger.info(f"✓ Saved checkpoint: {checkpoint_path}")
-
-        return str(checkpoint_path)
-
-    def train_resnet_attention(self, train_data: Tuple, val_data: Tuple, epochs: int = 20,
-                               batch_size: int = 16, lr: float = 0.0001) -> str:
-        """Train ResNetWithAttention (transfer learning)."""
-        logger.info("=" * 60)
-        logger.info("Training ResNetWithAttention (Transfer Learning)")
-        logger.info("=" * 60)
-
-        train_images, train_labels = train_data
-        val_images, val_labels = val_data
-
-        model = ResNetWithAttention(num_classes=3, pretrained=True).to(self.device)
-        logger.info(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
-
-        # Only train last layers for transfer learning
-        for param in model.backbone.parameters():
-            param.requires_grad = False
-
-        optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=lr)
-        criterion = nn.CrossEntropyLoss()
-
-        train_loader = DataLoader(
-            TensorDataset(train_images, train_labels),
-            batch_size=batch_size,
-            shuffle=True
-        )
-        val_loader = DataLoader(
-            TensorDataset(val_images, val_labels),
-            batch_size=batch_size
-        )
-
-        best_val_acc = 0.0
-        for epoch in range(epochs):
-            model.train()
-            train_loss = 0.0
-            train_correct = 0
-
-            for images, labels in train_loader:
-                optimizer.zero_grad()
-                outputs = model(images)
-                loss = criterion(outputs, labels)
-                loss.backward()
-                optimizer.step()
-
-                train_loss += loss.item()
-                train_correct += (outputs.argmax(1) == labels).sum().item()
-
-            model.eval()
-            val_correct = 0
-
-            with torch.no_grad():
-                for images, labels in val_loader:
-                    outputs = model(images)
-                    val_correct += (outputs.argmax(1) == labels).sum().item()
-
-            train_acc = train_correct / len(train_labels)
-            val_acc = val_correct / len(val_labels)
-
-            logger.info(
-                f"Epoch {epoch + 1}/{epochs} | "
-                f"Train Acc: {train_acc:.4f} | Val Acc: {val_acc:.4f}"
-            )
-
-            if val_acc > best_val_acc:
-                best_val_acc = val_acc
-                checkpoint_path = CHECKPOINTS_DIR / "drowsiness_resnet_attention.pt"
-                torch.save(model.state_dict(), checkpoint_path)
-                logger.info(f"✓ Saved checkpoint: {checkpoint_path}")
-
-        return str(CHECKPOINTS_DIR / "drowsiness_resnet_attention.pt")
-
-    @staticmethod
-    def _create_sequences(images: torch.Tensor, seq_len: int) -> List[torch.Tensor]:
-        """Create sequences for LSTM/GRU training."""
-        sequences = []
-        for i in range(len(images) - seq_len + 1):
-            seq = images[i:i + seq_len]  # Shape: (seq_len, C, H, W)
-            sequences.append(seq)
-        return sequences
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train all drowsiness detection models")
     parser.add_argument("--all", action="store_true", help="Train all models")
@@ -635,25 +509,6 @@ def main() -> int:
         )
         trainer.evaluate_cnn(path, splits['test'], batch_size=args.batch_size)
         trained_models.append(("Shallow CNN", path))
-
-    if "resnet" in models_to_train:
-        path = trainer.train_resnet_attention(
-            splits['train'], splits['val'],
-            epochs=args.epochs // 2,  # Transfer learning converges faster
-            batch_size=args.batch_size,
-            lr=args.learning_rate / 10  # Lower learning rate for pretrained
-        )
-        trained_models.append(("ResNet+Attention", path))
-
-    if "lstm" in models_to_train:
-        path = trainer.train_lstm(
-            splits['train'], splits['val'],
-            epochs=args.epochs,
-            batch_size=args.batch_size,
-            lr=args.learning_rate
-        )
-        if path:
-            trained_models.append(("LSTM", path))
 
     # Summary
     logger.info("\n" + "=" * 60)

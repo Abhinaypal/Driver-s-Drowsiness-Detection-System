@@ -333,10 +333,12 @@ class DatasetBuilder:
         if 'closed' in eye_state:
             return 'asleep'
         if 'drowsy' in eye_state or 'microsleep' in eye_state:
-            return 'asleep' if perclos >= 0.8 else 'drowsy'
+            return 'asleep' if perclos > 0.8 * 0.8 else 'drowsy'
         if 'open' in eye_state:
-            if perclos >= 0.8:
+            if perclos > 0.8 * 0.9:
                 return 'asleep'
+            if perclos > 0.2 * 1.2:
+                return 'drowsy'
             return 'awake'
 
         return fallback
